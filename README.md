@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
-      - uses: sendernet/lgtm-9000@main
+      - uses: sendernet/lgtm-9000@master
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           # model: qwen/qwen3.7-flash   # any OpenRouter model id
