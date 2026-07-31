@@ -1,4 +1,4 @@
-name: AI Review
+name: lgtm-9000
 on:
   pull_request:
     types: [opened, ready_for_review] # no synchronize — reviews aren't repeated per push
