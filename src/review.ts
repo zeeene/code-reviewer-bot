@@ -30,8 +30,12 @@ const ReviewSchema = z.object({
     .array(
       z.object({
         file: z.string(),
-        line: z.number().int().positive(),
+        // null = no single natural line (architectural / deleted-code issues)
+        line: z.number().int().positive().nullable().default(null),
+        // exact copy of the flagged line, used to verify/repair the anchor
+        line_content: z.string().nullable().default(null),
         severity: z.enum(["critical", "warning", "suggestion"]),
+        trigger: z.string().default(""),
         comment: z.string(),
       })
     )
@@ -40,23 +44,38 @@ const ReviewSchema = z.object({
   signoff: z.string().default(""),
 })
 export type Review = z.infer<typeof ReviewSchema>
+type ReviewComment = Review["comments"][number]
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested in test/review.test.ts)
 // ---------------------------------------------------------------------------
 
-// Pull the first JSON object out of a model reply, tolerating markdown fences.
+// Pull the JSON object out of a model reply, tolerating a <scratch> reasoning
+// block (see SYSTEM_PROMPT) and markdown fences. Falls back to the outermost
+// {...} span for models that wrap the JSON in stray prose.
 export function extractJson(text: string): unknown {
+  const scratchEnd = text.lastIndexOf("</scratch>")
+  if (scratchEnd !== -1) text = text.slice(scratchEnd + "</scratch>".length)
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-  return JSON.parse((fenced ? fenced[1] : text).trim())
+  if (fenced) text = fenced[1]
+  text = text.trim()
+  try {
+    return JSON.parse(text)
+  } catch {
+    const start = text.indexOf("{")
+    const end = text.lastIndexOf("}")
+    if (start === -1 || end <= start) throw new Error("no JSON object found in reply")
+    return JSON.parse(text.slice(start, end + 1))
+  }
 }
 
-// Lines the GitHub review API accepts inline comments on: new-side lines
-// (additions and context) that appear in the diff. Keyed as "file:line".
-// Anything the model flags outside this set gets folded into the summary,
-// because createReview 422s on out-of-diff anchors.
-export function diffAnchors(diff: string): Set<string> {
-  const anchors = new Set<string>()
+// New-side lines the GitHub review API accepts inline comments on (additions
+// and context), with their text: Map<file, Map<line, content>>. Content is
+// kept so a mis-numbered comment can be re-anchored via line_content.
+// Anything unanchorable folds into the summary, because createReview 422s on
+// out-of-diff anchors.
+export function diffNewLines(diff: string): Map<string, Map<number, string>> {
+  const files = new Map<string, Map<number, string>>()
   let file = ""
   let line = 0 // 0 = not inside a hunk yet
   for (const raw of diff.split("\n")) {
@@ -74,11 +93,27 @@ export function diffAnchors(diff: string): Set<string> {
     if (!file || line === 0) continue
     // "+" and " " lines exist on the new side; "-" lines don't advance it.
     if (raw.startsWith("+") || raw.startsWith(" ")) {
-      anchors.add(`${file}:${line}`)
+      if (!files.has(file)) files.set(file, new Map())
+      files.get(file)!.set(line, raw.slice(1))
       line++
     }
   }
-  return anchors
+  return files
+}
+
+// Resolve a comment to a commentable line: trust `line` if it's in the diff;
+// otherwise try to find `line_content` among the file's diff lines (closest
+// match to the claimed line wins ties). Returns null when unanchorable.
+export function anchorComment(c: ReviewComment, newLines: Map<string, Map<number, string>>): number | null {
+  const lines = newLines.get(c.file)
+  if (!lines) return null
+  if (c.line !== null && lines.has(c.line)) return c.line
+  const target = c.line_content?.trim()
+  if (!target) return null
+  const matches = [...lines].filter(([, text]) => text.trim() === target).map(([n]) => n)
+  if (matches.length === 0) return null
+  if (c.line === null) return matches[0]
+  return matches.reduce((a, b) => (Math.abs(b - c.line!) < Math.abs(a - c.line!) ? b : a))
 }
 
 // Changed files with a new side (i.e. not deleted), from the diff itself —
@@ -246,14 +281,17 @@ async function main() {
   console.log(`Reviewing PR #${pr.number} with ${model} (prompt ~${userContent.length} chars)`)
   const review = await callModel(model, apiKey, userContent)
 
-  // Split comments: anchorable ones go inline, the rest into the summary.
-  const anchors = diffAnchors(diff)
+  // Split comments: anchorable ones go inline (repairing bad line numbers via
+  // line_content), the rest into the summary.
+  const newLines = diffNewLines(diff)
   const inline: { path: string; line: number; side: "RIGHT"; body: string }[] = []
   const overflow: string[] = []
   for (const c of review.comments) {
-    const body = `**${c.severity}**: ${c.comment}`
-    if (anchors.has(`${c.file}:${c.line}`)) inline.push({ path: c.file, line: c.line, side: "RIGHT", body })
-    else overflow.push(`- \`${c.file}:${c.line}\` ${body}`)
+    let body = `**${c.severity}**: ${c.comment}`
+    if (c.trigger) body += `\n\n_Trigger:_ ${c.trigger}`
+    const line = anchorComment(c, newLines)
+    if (line !== null) inline.push({ path: c.file, line, side: "RIGHT", body })
+    else overflow.push(`- \`${c.file}${c.line !== null ? `:${c.line}` : ""}\` ${body.replace(/\n+/g, " ")}`)
   }
 
   const emoji = { approve: "✅", comment: "💬", request_changes: "🛑" }[review.verdict]
