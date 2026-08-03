@@ -6,7 +6,7 @@ export const BOT_NAME = "LGTM-9000"
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 // Overridable per-run via the MODEL env var (the `model` input in action.yml).
-export const DEFAULT_MODEL = "qwen/qwen3.7-flash"
+export const DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 
 // Files whose contents are never sent to the model: binaries, build artifacts,
 // and lockfiles — all diff noise with no review value.
