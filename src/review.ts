@@ -23,7 +23,7 @@ import {
 } from "./config.ts"
 
 // Shape the model must return; anything else triggers a retry (see callModel).
-const ReviewSchema = z.object({
+export const ReviewSchema = z.object({
   summary: z.string(),
   verdict: z.enum(["approve", "comment", "request_changes"]),
   comments: z
@@ -37,6 +37,9 @@ const ReviewSchema = z.object({
         severity: z.enum(["critical", "warning", "suggestion"]),
         trigger: z.string().default(""),
         comment: z.string(),
+        // Which reviewer flagged it; only meaningful in the primary's merged
+        // output when a secondary model ran (see secondaryFindingsSection).
+        source: z.enum(["primary", "secondary", "both"]).default("primary"),
       })
     )
     .default([]),
@@ -114,6 +117,25 @@ export function anchorComment(c: ReviewComment, newLines: Map<string, Map<number
   if (matches.length === 0) return null
   if (c.line === null) return matches[0]
   return matches.reduce((a, b) => (Math.abs(b - c.line!) < Math.abs(a - c.line!) ? b : a))
+}
+
+// Section appended to the primary model's user message when a secondary model
+// reviewed first: the primary must review independently in <scratch>, then
+// merge in only the secondary findings that are new and real, tagging origins
+// via the `source` field.
+export function secondaryFindingsSection(secondary: Review, secondaryModel: string): string {
+  return [
+    `\n\n## Second reviewer's findings (model: ${secondaryModel})`,
+    "IMPORTANT: First complete your OWN independent review in your <scratch> block, WITHOUT consulting the list below. Only then compare against these findings:",
+    '- A finding below that duplicates one of yours (same underlying issue, even if worded or located slightly differently): keep YOUR version, set its `source` to "both".',
+    '- A finding below that is genuinely new AND that you verify is a real issue: include it as your own comment (re-anchor file/line/line_content yourself), set `source` to "secondary".',
+    "- A finding below that is wrong or not worth raising: drop it silently.",
+    '- Your own findings not in the list: `source` "primary".',
+    "Recompute summary and verdict over the final merged comment set.",
+    "```json",
+    JSON.stringify(secondary.comments, null, 2),
+    "```",
+  ].join("\n")
 }
 
 // Changed files with a new side (i.e. not deleted), from the diff itself —
@@ -278,8 +300,21 @@ async function main() {
     `## Full contents of changed files\n${fileSections.join("\n\n")}`,
   ].join("\n\n")
 
-  console.log(`Reviewing PR #${pr.number} with ${model} (prompt ~${userContent.length} chars)`)
-  const review = await callModel(model, apiKey, userContent)
+  // Two-pass review: secondary model goes first (best-effort), then the
+  // primary reviews independently and merges in the secondary's novel
+  // findings itself — dedup is semantic, done by the model, not by code.
+  const secondaryModel = process.env.SECONDARY_MODEL?.trim() || ""
+  let secondary: Review | null = null
+  if (secondaryModel && secondaryModel !== model) {
+    console.log(`Secondary review of PR #${pr.number} with ${secondaryModel} (prompt ~${userContent.length} chars)`)
+    secondary = await callModel(secondaryModel, apiKey, userContent).catch((e) => {
+      console.warn(`Secondary model ${secondaryModel} failed, continuing single-model: ${e.message}`)
+      return null
+    })
+  }
+  const primaryContent = secondary ? userContent + secondaryFindingsSection(secondary, secondaryModel) : userContent
+  console.log(`Reviewing PR #${pr.number} with ${model} (prompt ~${primaryContent.length} chars)`)
+  const review = await callModel(model, apiKey, primaryContent)
 
   // Split comments: anchorable ones go inline (repairing bad line numbers via
   // line_content), the rest into the summary.
@@ -289,6 +324,10 @@ async function main() {
   for (const c of review.comments) {
     let body = `**${c.severity}**: ${c.comment}`
     if (c.trigger) body += `\n\n_Trigger:_ ${c.trigger}`
+    if (secondary) {
+      const flagged = { primary: model, secondary: secondaryModel, both: `${model}, ${secondaryModel}` }[c.source]
+      body += `\n\n_Flagged by: ${flagged}_`
+    }
     const line = anchorComment(c, newLines)
     if (line !== null) inline.push({ path: c.file, line, side: "RIGHT", body })
     else overflow.push(`- \`${c.file}${c.line !== null ? `:${c.line}` : ""}\` ${body.replace(/\n+/g, " ")}`)

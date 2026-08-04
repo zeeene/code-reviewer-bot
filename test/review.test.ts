@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { diffNewLines, anchorComment, changedFiles, extractJson } from "../src/review.ts"
+import { diffNewLines, anchorComment, changedFiles, extractJson, secondaryFindingsSection, ReviewSchema } from "../src/review.ts"
 
 const DIFF = `diff --git a/src/a.ts b/src/a.ts
 index 111..222 100644
@@ -34,7 +34,7 @@ test("changedFiles skips deleted files", () => {
   assert.deepEqual(changedFiles(DIFF), ["src/a.ts"])
 })
 
-const base = { severity: "warning" as const, trigger: "", comment: "c", line_content: null, line: null }
+const base = { severity: "warning" as const, trigger: "", comment: "c", line_content: null, line: null, source: "primary" as const }
 
 test("anchorComment trusts a valid line, repairs via line_content, else null", () => {
   const files = diffNewLines(DIFF)
@@ -48,6 +48,34 @@ test("anchorComment trusts a valid line, repairs via line_content, else null", (
   assert.equal(anchorComment({ ...base, file: "src/a.ts", line: 99, line_content: "nope" }, files), null)
   // unknown file
   assert.equal(anchorComment({ ...base, file: "other.ts", line: 1 }, files), null)
+})
+
+test("ReviewSchema defaults source to primary, accepts secondary/both", () => {
+  const parsed = ReviewSchema.parse({
+    summary: "s",
+    verdict: "comment",
+    comments: [
+      { file: "a.ts", severity: "warning", comment: "no source" },
+      { file: "a.ts", severity: "warning", comment: "from qwen", source: "secondary" },
+      { file: "a.ts", severity: "warning", comment: "agreed", source: "both" },
+    ],
+  })
+  assert.deepEqual(
+    parsed.comments.map((c) => c.source),
+    ["primary", "secondary", "both"]
+  )
+})
+
+test("secondaryFindingsSection embeds model name, ordering instruction, and findings JSON", () => {
+  const secondary = ReviewSchema.parse({
+    summary: "s",
+    verdict: "comment",
+    comments: [{ file: "a.ts", line: 2, severity: "critical", comment: "off-by-one" }],
+  })
+  const section = secondaryFindingsSection(secondary, "qwen/qwen3.7-flash")
+  assert.ok(section.includes("qwen/qwen3.7-flash"))
+  assert.ok(section.includes("OWN independent review"))
+  assert.ok(section.includes('"off-by-one"'))
 })
 
 test("extractJson handles scratch blocks, fences, bare JSON, and stray prose", () => {

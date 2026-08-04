@@ -52,10 +52,17 @@ jobs:
       - uses: sendernet/lgtm-9000@master
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
-          # model: qwen/qwen3.7-flash   # any OpenRouter model id
-          # extra-instructions: |       # optional project-specific review guidance
+          # model: deepseek/deepseek-v4-flash    # primary reviewer (any OpenRouter model id)
+          # secondary-model: qwen/qwen3.7-flash  # second reviewer; "" disables
+          # extra-instructions: |                # optional project-specific review guidance
           #   This is a payments service; scrutinize idempotency and rounding.
 ```
+
+By default two models review each PR: the secondary model (`secondary-model`)
+reviews first, then the primary (`model`) reviews independently and merges in
+only the secondary findings that are new and real — each posted comment is
+tagged `Flagged by: <model>`. Set `secondary-model: ""` for single-model
+reviews.
 
 Then add an `OPENROUTER_API_KEY` secret (repo → Settings → Secrets → Actions).
 

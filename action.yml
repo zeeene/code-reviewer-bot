@@ -5,7 +5,10 @@ inputs:
     description: OpenRouter API key
     required: true
   model:
-    description: OpenRouter model id
+    description: OpenRouter model id (primary reviewer)
+    default: deepseek/deepseek-v4-flash
+  secondary-model:
+    description: Optional second reviewer model, run before the primary; the primary merges in only its new findings. Empty disables.
     default: qwen/qwen3.7-flash
   extra-instructions:
     description: Optional project-specific review guidance appended to the general system prompt
@@ -28,5 +31,6 @@ runs:
       env:
         OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
         MODEL: ${{ inputs.model }}
+        SECONDARY_MODEL: ${{ inputs.secondary-model }}
         EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
